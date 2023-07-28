@@ -8,22 +8,22 @@ import {
 import { subscribe } from 'diagnostics_channel';
   import { Server, Socket } from 'socket.io';
   
-  @WebSocketGateway()
+  @WebSocketGateway({cors:true})
   export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @WebSocketServer()
     server: Server;
-  
+    
+    connectedUsers: Map<string, string> = new Map();
     connectedUsersRoom: Map<string, string> = new Map();
-  
+    
     handleConnection(client: Socket, ...args: any[]) {
-      const trainingID = client.handshake.auth.training_id;
       const userID = client.handshake.auth.user_id;
 
-      if (!trainingID || !userID) {
+      if (!userID) {
         // Unauthorized connection
         client.disconnect();
       }   
-      
+      this.connectedUsers.set(userID,client.id);
     }
 
     @SubscribeMessage('joinRoom')
@@ -36,6 +36,12 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('trainingPrintedSend')
     public handleMessage(client: Socket, payload: any): void {
         this.server.to(payload.room).emit('trainingPrintedReceived',payload);
+    }
+
+    @SubscribeMessage('private')
+    public privateMessage(client: Socket, payload: any): void {
+        const client_id = this.connectedUsers.get(payload.user_id);
+        this.server.to(client_id).emit('privateReceived',payload);
     }
 
     @SubscribeMessage('leaveRoom')
