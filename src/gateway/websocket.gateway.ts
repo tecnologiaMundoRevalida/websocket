@@ -40,7 +40,7 @@ import { subscribe } from 'diagnostics_channel';
 
     @SubscribeMessage('private')
     public privateMessage(client: Socket, payload: any): void {
-        const client_id = this.connectedUsers.get(payload.user_id);
+        const client_id = this.connectedUsers.get(payload.student_id);
         this.server.to(client_id).emit('privateReceived',payload);
     }
 
