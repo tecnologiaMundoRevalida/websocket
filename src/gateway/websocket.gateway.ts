@@ -30,7 +30,7 @@ import { subscribe } from 'diagnostics_channel';
     public joinRoom(client: Socket, room: string): void {
         client.join(room);
         this.connectedUsersRoom.set(client.id,room);
-        client.emit('joinedRoom',client.id);
+        client.to(room).emit('joinedRoom',client.id);
     }
 
     @SubscribeMessage('trainingPrintedSend')
@@ -47,10 +47,12 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('leaveRoom')
     public disconnectedRoom(client: Socket, room: string): void {
       client.leave(room);
-      client.emit('disconnectedRoom', room);
+      console.log(room);
+      client.to(room).emit('disconnectedRoom', room);
     }
 
     handleDisconnect(client: Socket) {
+      console.log('ok desconectado');
       const room = this.connectedUsersRoom.get(client.id);
       if (room) {
         this.connectedUsersRoom.delete(client.id);
