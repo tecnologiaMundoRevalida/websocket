@@ -38,6 +38,16 @@ import { subscribe } from 'diagnostics_channel';
         this.server.to(payload.room).emit('trainingPrintedReceived',payload);
     }
 
+    @SubscribeMessage('trainingStopwatch')
+    public trainingStopwatch(client: Socket, payload: any): void {
+        this.server.to(payload.room).emit('trainingStopwatchReceived',payload);
+    }
+
+    @SubscribeMessage('finishedTraining')
+    public finishedTraining(client: Socket, payload: any): void {
+        this.server.to(payload.room).emit('finishedTrainingReceived',payload);
+    }
+
     @SubscribeMessage('private')
     public privateMessage(client: Socket, payload: any): void {
         const client_id = this.connectedUsers.get(payload.student_id);
@@ -47,12 +57,10 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('leaveRoom')
     public disconnectedRoom(client: Socket, room: string): void {
       client.leave(room);
-      console.log(room);
       client.to(room).emit('disconnectedRoom', room);
     }
 
     handleDisconnect(client: Socket) {
-      console.log('ok desconectado');
       const room = this.connectedUsersRoom.get(client.id);
       if (room) {
         this.connectedUsersRoom.delete(client.id);
