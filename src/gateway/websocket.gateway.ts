@@ -35,7 +35,8 @@ import { subscribe } from 'diagnostics_channel';
 
     @SubscribeMessage('trainingPrintedSend')
     public handleMessage(client: Socket, payload: any): void {
-        this.server.to(payload.room).emit('trainingPrintedReceived',payload);
+        const client_id = this.connectedUsers.get(payload.student_id);
+        this.server.to(client_id).emit('trainingPrintedReceived',payload);
     }
 
     @SubscribeMessage('trainingStopwatch')
