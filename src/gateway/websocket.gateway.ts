@@ -6,32 +6,34 @@ import {
      OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { subscribe } from 'diagnostics_channel';
-import { Server, Socket } from 'socket.io';
+  import { Server, Socket } from 'socket.io';
+  
+  @WebSocketGateway({cors:true})
+  export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnect {
+    @WebSocketServer()
+    server: Server;
+    flo = true;
+    connectedUsers: Map<string, string> = new Map();
+    connectedUsersRoom: Map<string, string> = new Map();
+    
+    handleConnection(client: Socket, ...args: any[]) {
+      // this.server.removeAllListeners();
+      const userID = client.handshake.auth.user_id;
+      
+      if (!userID) {
+        // Unauthorized connection
+        client.disconnect();
+      }   
+      this.connectedUsers.set(userID,client.id);
+    }
 
-@WebSocketGateway({ cors: true })
-export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnect {
-     @WebSocketServer()
-     server: Server;
-
-     connectedUsers: Map<string, string> = new Map();
-     'connectedUsersRoom': Map<string, string> = new Map();
-
-     handleConnection(client: Socket, ...args: any[]) {
-          const userID = client.handshake.auth.user_id;
-
-          if (!userID) {
-               // Unauthorized connection
-               client.disconnect();
-          }
-          this.connectedUsers.set(userID, client.id);
-     }
-
-     @SubscribeMessage('joinRoom')
-     public joinRoom(client: Socket, room: string): void {
-          client.join(room);
-          this.connectedUsersRoom.set(client.id, room);
-          client.to(room).emit('joinedRoom', client.id);
-     }
+    @SubscribeMessage('joinRoom')
+    public joinRoom(client: Socket, body: any): void {
+        console.log(body)
+        const client_id = this.connectedUsers.get(body.id);
+        this.connectedUsersRoom.set(client.id,body.training);
+        this.server.to(client_id).emit('joinedRoom',client.id);
+    }
 
      @SubscribeMessage('trainingPrintedSend')
      public handleMessage(client: Socket, payload: any): void {
@@ -54,11 +56,12 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
           this.server.to(client_id).emit('privateReceived', payload);
      }
 
-     @SubscribeMessage('leaveRoom')
-     public disconnectedRoom(client: Socket, room: string): void {
-          client.leave(room);
-          client.to(room).emit('disconnectedRoom', room);
-     }
+    @SubscribeMessage('leaveRoom')
+    public disconnectedRoom(client: Socket, room: string): void {
+      client.leave(room);
+      this.server.to(room).emit('disconnectedRoom', room);
+      this.server.in(room).disconnectSockets(true);
+    }
 
      handleDisconnect(client: Socket) {
           const room = this.connectedUsersRoom.get(client.id);
