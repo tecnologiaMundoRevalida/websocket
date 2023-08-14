@@ -17,7 +17,7 @@ import { subscribe } from 'diagnostics_channel';
     connectedUsersRoom: Map<string, string> = new Map();
     
     handleConnection(client: Socket, ...args: any[]) {
-      // this.server.removeAllListeners();
+      
       const userID = client.handshake.auth.user_id;
       
       if (!userID) {
@@ -29,7 +29,7 @@ import { subscribe } from 'diagnostics_channel';
 
     @SubscribeMessage('joinRoom')
     public joinRoom(client: Socket, body: any): void {
-        console.log(body)
+        client.join(body.training)
         const client_id = this.connectedUsers.get(body.id);
         this.connectedUsersRoom.set(client.id,body.training);
         this.server.to(client_id).emit('joinedRoom',client.id);
@@ -59,14 +59,13 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('leaveRoom')
     public disconnectedRoom(client: Socket, room: string): void {
       client.leave(room);
-      this.server.to(room).emit('disconnectedRoom', room);
-      this.server.in(room).disconnectSockets(true);
+      this.connectedUsersRoom.delete(client.id);
+      client.to(room).emit('disconnectedRoom', room);
     }
 
     handleDisconnect(client: Socket) {
       const room = this.connectedUsersRoom.get(client.id);
       if (room) {
-        this.connectedUsersRoom.delete(client.id);
         this.disconnectedRoom(client,room);
       }
     }
