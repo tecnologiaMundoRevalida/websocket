@@ -25,11 +25,12 @@ import { subscribe } from 'diagnostics_channel';
         client.disconnect();
       }   
       this.connectedUsers.set(userID,client.id);
+      console.log(this.connectedUsers);
     }
 
     @SubscribeMessage('joinRoom')
     public joinRoom(client: Socket, body: any): void {
-        client.join(body.training)
+        client.join(body.training);
         const client_id = this.connectedUsers.get(body.id);
         this.connectedUsersRoom.set(client.id,body.training);
         this.server.to(client_id).emit('joinedRoom',client.id);
@@ -42,6 +43,8 @@ import { subscribe } from 'diagnostics_channel';
 
     @SubscribeMessage('trainingStopwatch')
     public trainingStopwatch(client: Socket, payload: any): void {
+      console.log(this.connectedUsersRoom);
+      console.log(payload.room)
         this.server.to(payload.room).emit('trainingStopwatchReceived',payload);
     }
 
@@ -56,9 +59,29 @@ import { subscribe } from 'diagnostics_channel';
         this.server.to(client_id).emit('privateReceived',payload);
     }
 
+    //------------INICIO WEBRTC-----------------
+    // bodyExample : {room:13,offer:24123ereasd#4$$$%45e}
+    @SubscribeMessage('offer')
+    public offer(client: Socket, payload: any): void {
+      console.log(payload);
+      client.to(payload.room).emit('offerReceived',payload.offer);
+    }
+
+    // bodyExample : {room:13,answer:24123ereasd#4$$$%45e}
+    @SubscribeMessage('answer')
+    public answer(client: Socket, payload: any): void {
+      client.to(payload.room).emit('answerReceived',payload.answer);
+    }
+
+    // bodyExample : {room:13,candidate:24123ereasd#4$$$%45e}
+    @SubscribeMessage('iceCandidate')
+    public iceCandidate(client: Socket, payload: any): void {
+        client.to(payload.room).emit('iceCandidateReceived',payload.candidate);
+    }
+    //------------FIM WEBRTC-----------------
+
     @SubscribeMessage('leaveRoom')
     public disconnectedRoom(client: Socket, room: string): void {
-      client.leave(room);
       this.connectedUsersRoom.delete(client.id);
       client.to(room).emit('disconnectedRoom', room);
     }
