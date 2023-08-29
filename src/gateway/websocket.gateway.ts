@@ -25,8 +25,13 @@ import { subscribe } from 'diagnostics_channel';
         client.disconnect();
       }   
       this.connectedUsers.set(userID,client.id);
-      console.log(this.connectedUsers);
     }
+
+    @SubscribeMessage('usersOnline')
+    public usersOnline(client: Socket): void {
+        this.server.to(client.id).emit('usersOnlineReceived',{users: Object.fromEntries(this.connectedUsers)});
+    }
+
 
     @SubscribeMessage('joinRoom')
     public joinRoom(client: Socket, body: any): void {
@@ -43,8 +48,6 @@ import { subscribe } from 'diagnostics_channel';
 
     @SubscribeMessage('trainingStopwatch')
     public trainingStopwatch(client: Socket, payload: any): void {
-      console.log(this.connectedUsersRoom);
-      console.log(payload.room)
         this.server.to(payload.room).emit('trainingStopwatchReceived',payload);
     }
 
@@ -63,7 +66,6 @@ import { subscribe } from 'diagnostics_channel';
     // bodyExample : {room:13,offer:24123ereasd#4$$$%45e}
     @SubscribeMessage('offer')
     public offer(client: Socket, payload: any): void {
-      console.log(payload);
       client.to(payload.room).emit('offerReceived',payload.offer);
     }
 
