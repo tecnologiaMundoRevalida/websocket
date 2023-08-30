@@ -14,6 +14,7 @@ import { subscribe } from 'diagnostics_channel';
     server: Server;
     flo = true;
     connectedUsers: Map<string, string> = new Map();
+    connectedUsersOnline: Map<string, string> = new Map();
     connectedUsersRoom: Map<string, string> = new Map();
     
     handleConnection(client: Socket, ...args: any[]) {
@@ -25,13 +26,13 @@ import { subscribe } from 'diagnostics_channel';
         client.disconnect();
       }   
       this.connectedUsers.set(userID,client.id);
+      this.connectedUsersOnline.set(client.id,userID);
     }
 
     @SubscribeMessage('usersOnline')
     public usersOnline(client: Socket): void {
         this.server.to(client.id).emit('usersOnlineReceived',{users: Object.fromEntries(this.connectedUsers)});
     }
-
 
     @SubscribeMessage('joinRoom')
     public joinRoom(client: Socket, body: any): void {
@@ -85,6 +86,11 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('leaveRoom')
     public disconnectedRoom(client: Socket, room: string): void {
       this.connectedUsersRoom.delete(client.id);
+      const client_id_online = this.connectedUsersOnline.get(client.id);
+      if(client_id_online){
+        this.connectedUsersOnline.delete(client.id);
+        this.connectedUsers.delete(client_id_online);
+      }
       client.to(room).emit('disconnectedRoom', room);
     }
 
