@@ -40,6 +40,7 @@ import { subscribe } from 'diagnostics_channel';
         const client_id = this.connectedUsers.get(body.id);
         this.connectedUsersRoom.set(client.id,body.training);
         this.server.to(client_id).emit('joinedRoom',client.id);
+        this.getUserOnlineRoom(client,body);
     }
 
     @SubscribeMessage('trainingPrintedSend')
@@ -61,6 +62,13 @@ import { subscribe } from 'diagnostics_channel';
     public privateMessage(client: Socket, payload: any): void {
         const client_id = this.connectedUsers.get(payload.student_id);
         this.server.to(client_id).emit('privateReceived',payload);
+    }
+
+    @SubscribeMessage('getUserOnlineRoom')
+    public getUserOnlineRoom(client: Socket, payload: any): void {
+        const client_id = this.connectedUsers.get(payload.id);
+        if(client_id != null)
+          this.server.to(payload.training).emit('showUserOnlineRoom',client_id);
     }
 
     //------------INICIO WEBRTC-----------------
