@@ -89,6 +89,26 @@ import { subscribe } from 'diagnostics_channel';
     public iceCandidate(client: Socket, payload: any): void {
         client.to(payload.room).emit('iceCandidateReceived',payload.candidate);
     }
+
+    @SubscribeMessage('toggleAudioStudent')
+    public toggleAudioStudent(client: Socket, payload: any): void {
+        client.to(payload.room).emit('audioToggledStudent', { audioMuted: payload.audioMuted });
+    }
+
+    @SubscribeMessage('toggleVideoStudent')
+    public toggleVideoStudent(client: Socket, payload: any): void {
+        client.to(payload.room).emit('videoToggledStudent', { videoPaused: payload.videoPaused });
+    }
+    @SubscribeMessage('toggleAudioInstructor')
+    public toggleAudioInstructor(client: Socket, payload: any): void {
+        client.to(payload.room).emit('audioToggledInstructor', { audioMuted: payload.audioMuted });
+    }
+
+    @SubscribeMessage('toggleVideoInstructor')
+    public toggleVideoInstructor(client: Socket, payload: any): void {
+        client.to(payload.room).emit('videoToggledInstructor', { videoPaused: payload.videoPaused });
+    }
+
     //------------FIM WEBRTC-----------------
 
     @SubscribeMessage('leaveRoom')
