@@ -124,9 +124,7 @@ import { subscribe } from 'diagnostics_channel';
 
     handleDisconnect(client: Socket) {
       const room = this.connectedUsersRoom.get(client.id);
-      if (room) {
         this.disconnectedRoom(client,room);
-      }
     }
 
   }
