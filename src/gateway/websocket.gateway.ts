@@ -67,7 +67,8 @@ import { subscribe } from 'diagnostics_channel';
     @SubscribeMessage('getUserOnlineRoom')
     public getUserOnlineRoom(client: Socket, payload: any): void {
         const client_id = this.connectedUsers.get(payload.id);
-        if(client_id != null)
+        const user_room = this.connectedUsersRoom.get(client_id);
+        if(user_room == payload.training)
           this.server.to(payload.training).emit('showUserOnlineRoom',client_id);
     }
 
