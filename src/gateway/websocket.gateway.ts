@@ -47,6 +47,11 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
      public handleMessage(client: Socket, payload: any): void {
           this.server.to(payload.room).emit('trainingPrintedReceived', payload);
      }
+     
+     @SubscribeMessage('itemsSend')
+     public handleSendItems(client: Socket, payload: any): void {
+          this.server.to(payload.room).emit('itemsReceived', payload);
+     }
 
      @SubscribeMessage('trainingStopwatch')
      public trainingStopwatch(client: Socket, payload: any): void {
