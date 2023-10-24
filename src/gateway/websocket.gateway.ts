@@ -39,7 +39,7 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
       client.join(body.training);
       const client_id = this.connectedUsers.get(body.id);
       this.connectedUsersRoom.set(client.id,body.training);
-      this.server.to(client_id).emit('joinedRoom',client.id);
+      this.server.to(client_id).emit('joinedRoom',{client_id: client.id, training: body.training} );
       this.getUserOnlineRoom(client,body);
   }
 
