@@ -37,7 +37,7 @@ export class WebsocketGateway implements OnGatewayConnection, OnGatewayDisconnec
   @SubscribeMessage('checkUserIsOnline')
   public checkUserIsOnline(client: Socket, body:any): void {
       const client_id = this.connectedUsers.get(body.id);
-      this.server.to(client.id).emit('checkUserIsOnlineReceived',client_id);
+      this.server.to(client.id).emit('checkUserIsOnlineReceived',{isOnline: client_id, id: body.id});
   }
 
   @SubscribeMessage('joinRoom')
