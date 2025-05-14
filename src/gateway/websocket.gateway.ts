@@ -7,6 +7,14 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+interface OnlineUser {
+  userId: string;
+  socketId: string;
+  connectedAt: Date;
+  lastActivity?: Date;
+  room?: string;
+}
+
 @WebSocketGateway({
   cors: true,
   connectionStateRecovery: {
@@ -19,99 +27,169 @@ export class WebsocketGateway
 {
   @WebSocketServer()
   server: Server;
+
   flo = true;
   connectedUsers: Map<string, string> = new Map();
   connectedUsersOnline: Map<string, string> = new Map();
   connectedUsersRoom: Map<string, string> = new Map();
 
-  handleConnection(client: Socket, ...args: any[]) {
-    const userID = client.handshake.auth.user_id;
+  private onlineUsers: Map<string, OnlineUser> = new Map();
+  private socketToUserId: Map<string, string> = new Map();
 
-    if (!userID) {
-      // Unauthorized connection
+  handleConnection(client: Socket, ...args: any[]) {
+    const userId = client.handshake.auth.user_id;
+
+    if (!userId) {
       client.disconnect();
+      return;
     }
-    this.connectedUsers.set(userID, client.id);
-    this.connectedUsersOnline.set(client.id, userID);
+
+    this.connectedUsers.set(userId, client.id);
+    this.connectedUsersOnline.set(client.id, userId);
+
+    const userInfo: OnlineUser = {
+      userId,
+      socketId: client.id,
+      connectedAt: new Date(),
+      lastActivity: new Date(),
+    };
+
+    this.onlineUsers.set(userId, userInfo);
+    this.socketToUserId.set(client.id, userId);
+
+    this.broadcastOnlineUsers();
   }
+
+  handleDisconnect(client: Socket) {
+    const room = this.connectedUsersRoom.get(client.id);
+    const userId = this.socketToUserId.get(client.id);
+
+    const client_id_online = this.connectedUsersOnline.get(client.id);
+    if (client_id_online) {
+      this.connectedUsersOnline.delete(client.id);
+      this.connectedUsers.delete(client_id_online);
+    }
+
+    if (userId) {
+      this.onlineUsers.delete(userId);
+      this.socketToUserId.delete(client.id);
+      this.broadcastOnlineUsers();
+    }
+
+    if (room) {
+      client.to(room).emit('disconnectedRoom', room);
+      this.connectedUsersRoom.delete(client.id);
+    }
+  }
+
+  /* --------------------------
+   *  Métodos do sistema antigo (compatibilidade)
+   * -------------------------- */
 
   @SubscribeMessage('usersOnline')
   public usersOnline(client: Socket): void {
+    const onlineUsersList = this.getOnlineUsersList();
+    console.log('usersOnline', onlineUsersList);
     this.server.to(client.id).emit('usersOnlineReceived', {
-      users: Object.fromEntries(this.connectedUsers),
+      users: onlineUsersList,
+      count: onlineUsersList.length,
     });
   }
 
   @SubscribeMessage('checkUserIsOnline')
   public checkUserIsOnline(client: Socket, body: any): void {
-    const client_id = this.connectedUsers.get(body.id);
+    const isOnline = this.onlineUsers.has(body.id);
     this.server
       .to(client.id)
-      .emit('checkUserIsOnlineReceived', { isOnline: client_id, id: body.id });
+      .emit('checkUserIsOnlineReceived', { isOnline, id: body.id });
   }
 
   @SubscribeMessage('joinRoom')
   public joinRoom(client: Socket, body: any): void {
-    client.join(body.training);
-    const client_id = this.connectedUsers.get(body.id);
-    this.connectedUsersRoom.set(client.id, body.training);
+    const { training, id } = body;
+    client.join(training);
+
+    // Sistema antigo
+    const client_id = this.connectedUsers.get(id);
+    this.connectedUsersRoom.set(client.id, training);
     this.server
       .to(client_id)
-      .emit('joinedRoom', { client_id: client.id, training: body.training });
+      .emit('joinedRoom', { client_id: client.id, training });
+
+    // Sistema novo - atualiza a sala do usuário
+    const userId = this.socketToUserId.get(client.id);
+    if (userId && this.onlineUsers.has(userId)) {
+      const user = this.onlineUsers.get(userId);
+      user.room = training;
+      user.lastActivity = new Date();
+      this.onlineUsers.set(userId, user);
+    }
+
     this.getUserOnlineRoom(client, body);
+    this.broadcastOnlineUsers();
   }
 
   @SubscribeMessage('trainingPrintedSend')
   public handleMessage(client: Socket, payload: any): void {
     this.server.to(payload.room).emit('trainingPrintedReceived', payload);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('trainingStopwatch')
   public trainingStopwatch(client: Socket, payload: any): void {
     this.server.to(payload.room).emit('trainingStopwatchReceived', payload);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('finishedTraining')
   public finishedTraining(client: Socket, payload: any): void {
     this.server.to(payload.room).emit('finishedTrainingReceived', payload);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('itemsSend')
   public handleSendItems(client: Socket, payload: any): void {
     this.server.to(payload.room).emit('itemsReceived', payload);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('private')
   public privateMessage(client: Socket, payload: any): void {
     const client_id = this.connectedUsers.get(payload.student_id);
     this.server.to(client_id).emit('privateReceived', payload);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('getUserOnlineRoom')
   public getUserOnlineRoom(client: Socket, payload: any): void {
     const client_id = this.connectedUsers.get(payload.id);
     const user_room = this.connectedUsersRoom.get(client_id);
-    if (user_room == payload.training)
+    if (user_room == payload.training) {
       this.server.to(payload.training).emit('showUserOnlineRoom', client_id);
+    }
+    this.updateUserActivity(client.id);
   }
 
-  //------------INICIO WEBRTC-----------------
-  // bodyExample : {room:13,offer:24123ereasd#4$$$%45e}
+  /* --------------------------
+   *  Métodos WebRTC
+   * -------------------------- */
+
   @SubscribeMessage('offer')
   public offer(client: Socket, payload: any): void {
     client.to(payload.room).emit('offerReceived', payload.offer);
+    this.updateUserActivity(client.id);
   }
 
-  // bodyExample : {room:13,answer:24123ereasd#4$$$%45e}
   @SubscribeMessage('answer')
   public answer(client: Socket, payload: any): void {
     client.to(payload.room).emit('answerReceived', payload.answer);
+    this.updateUserActivity(client.id);
   }
 
-  // bodyExample : {room:13,candidate:24123ereasd#4$$$%45e}
   @SubscribeMessage('iceCandidate')
   public iceCandidate(client: Socket, payload: any): void {
     client.to(payload.room).emit('iceCandidateReceived', payload.candidate);
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('toggleAudioStudent')
@@ -119,6 +197,7 @@ export class WebsocketGateway
     client
       .to(payload.room)
       .emit('audioToggledStudent', { audioMuted: payload.audioMuted });
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('toggleVideoStudent')
@@ -126,12 +205,15 @@ export class WebsocketGateway
     client
       .to(payload.room)
       .emit('videoToggledStudent', { videoPaused: payload.videoPaused });
+    this.updateUserActivity(client.id);
   }
+
   @SubscribeMessage('toggleAudioInstructor')
   public toggleAudioInstructor(client: Socket, payload: any): void {
     client
       .to(payload.room)
       .emit('audioToggledInstructor', { audioMuted: payload.audioMuted });
+    this.updateUserActivity(client.id);
   }
 
   @SubscribeMessage('toggleVideoInstructor')
@@ -139,23 +221,71 @@ export class WebsocketGateway
     client
       .to(payload.room)
       .emit('videoToggledInstructor', { videoPaused: payload.videoPaused });
+    this.updateUserActivity(client.id);
   }
 
-  //------------FIM WEBRTC-----------------
+  /* --------------------------
+   *  Métodos do novo sistema
+   * -------------------------- */
+
+  @SubscribeMessage('getOnlineUsers')
+  public handleGetOnlineUsers(client: Socket) {
+    client.emit('onlineUsersList', this.getOnlineUsersList());
+    this.updateUserActivity(client.id);
+  }
+
+  @SubscribeMessage('requestUsersUpdate')
+  public requestUsersUpdate(client: Socket) {
+    this.broadcastOnlineUsers();
+    this.updateUserActivity(client.id);
+  }
+
+  private broadcastOnlineUsers() {
+    const onlineUsersList = this.getOnlineUsersList();
+    this.server.emit('onlineUsersUpdated', {
+      users: onlineUsersList,
+      count: onlineUsersList.length,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private getOnlineUsersList() {
+    return Array.from(this.onlineUsers.values()).map((user) => ({
+      userId: user.userId,
+      socketId: user.socketId,
+      connectedAt: user.connectedAt,
+      lastActivity: user.lastActivity,
+      room: user.room,
+    }));
+  }
+
+  private updateUserActivity(socketId: string) {
+    const userId = this.socketToUserId.get(socketId);
+    if (userId && this.onlineUsers.has(userId)) {
+      const user = this.onlineUsers.get(userId);
+      user.lastActivity = new Date();
+      this.onlineUsers.set(userId, user);
+    }
+  }
 
   @SubscribeMessage('leaveRoom')
   public disconnectedRoom(client: Socket, room: string): void {
     this.connectedUsersRoom.delete(client.id);
+
+    const userId = this.socketToUserId.get(client.id);
+    if (userId && this.onlineUsers.has(userId)) {
+      const user = this.onlineUsers.get(userId);
+      user.room = undefined;
+      this.onlineUsers.set(userId, user);
+    }
+
     const client_id_online = this.connectedUsersOnline.get(client.id);
     if (client_id_online) {
       this.connectedUsersOnline.delete(client.id);
       this.connectedUsers.delete(client_id_online);
     }
-    client.to(room).emit('disconnectedRoom', room);
-  }
 
-  handleDisconnect(client: Socket) {
-    const room = this.connectedUsersRoom.get(client.id);
-    this.disconnectedRoom(client, room);
+    client.to(room).emit('disconnectedRoom', room);
+    this.broadcastOnlineUsers();
   }
 }
