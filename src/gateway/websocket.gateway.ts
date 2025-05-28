@@ -85,7 +85,7 @@ export class WebsocketGateway
   public privateMessage(client: Socket, payload: any): void {
     const client_id = this.connectedUsers.get(payload.student_id);
     this.server.to(client_id).emit('privateReceived', payload);
-  }
+  }  
 
   @SubscribeMessage('getUserOnlineRoom')
   public getUserOnlineRoom(client: Socket, payload: any): void {
@@ -157,5 +157,22 @@ export class WebsocketGateway
   handleDisconnect(client: Socket) {
     const room = this.connectedUsersRoom.get(client.id);
     this.disconnectedRoom(client, room);
+  }
+
+  public handleMeetingInvitation(payload: any): void {
+    const userIds: string[] = payload.user_ids.map((id: number) => id.toString());    
+
+    userIds.forEach((userId) => {
+      const client_id = this.connectedUsers.get(userId);      
+
+      if (client_id) {        
+        this.server.to(client_id).emit('meetingInvitationReceived', {
+          meeting_id: payload.meeting_id,
+          meeting_url: payload.meeting_url,
+          title: payload.title,
+          created_at: payload.created_at
+        });
+      }
+    });
   }
 }
