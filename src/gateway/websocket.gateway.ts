@@ -10,8 +10,8 @@ import { Server, Socket } from 'socket.io';
 @WebSocketGateway({
   cors: true,
   connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000,
-    skipMiddlewares: true,
+    maxDisconnectionDuration: 10 * 60 * 1000,
+    skipMiddlewares: false,
   },
 })
 export class WebsocketGateway
