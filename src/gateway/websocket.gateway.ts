@@ -191,55 +191,6 @@ export class WebsocketGateway
     }
   }
 
-  //------------INICIO WEBRTC-----------------
-  // bodyExample : {room:13,offer:24123ereasd#4$$$%45e}
-  @SubscribeMessage('offer')
-  public offer(client: Socket, payload: any): void {
-    client.to(payload.room).emit('offerReceived', payload.offer);
-  }
-
-  // bodyExample : {room:13,answer:24123ereasd#4$$$%45e}
-  @SubscribeMessage('answer')
-  public answer(client: Socket, payload: any): void {
-    client.to(payload.room).emit('answerReceived', payload.answer);
-  }
-
-  // bodyExample : {room:13,candidate:24123ereasd#4$$$%45e}
-  @SubscribeMessage('iceCandidate')
-  public iceCandidate(client: Socket, payload: any): void {
-    client.to(payload.room).emit('iceCandidateReceived', payload.candidate);
-  }
-
-  @SubscribeMessage('toggleAudioStudent')
-  public toggleAudioStudent(client: Socket, payload: any): void {
-    client
-      .to(payload.room)
-      .emit('audioToggledStudent', { audioMuted: payload.audioMuted });
-  }
-
-  @SubscribeMessage('toggleVideoStudent')
-  public toggleVideoStudent(client: Socket, payload: any): void {
-    client
-      .to(payload.room)
-      .emit('videoToggledStudent', { videoPaused: payload.videoPaused });
-  }
-
-  @SubscribeMessage('toggleAudioInstructor')
-  public toggleAudioInstructor(client: Socket, payload: any): void {
-    client
-      .to(payload.room)
-      .emit('audioToggledInstructor', { audioMuted: payload.audioMuted });
-  }
-
-  @SubscribeMessage('toggleVideoInstructor')
-  public toggleVideoInstructor(client: Socket, payload: any): void {
-    client
-      .to(payload.room)
-      .emit('videoToggledInstructor', { videoPaused: payload.videoPaused });
-  }
-
-  //------------FIM WEBRTC-----------------
-
   /**
    * Sair da SALA não é ficar offline. Antes este handler apagava o usuário de
    * `connectedUsers`, então quem terminava um treinamento sumia da lista de
