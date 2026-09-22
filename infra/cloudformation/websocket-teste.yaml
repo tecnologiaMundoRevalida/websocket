@@ -1,0 +1,503 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Ambiente de TESTE do servidor WebSocket de treinamento. Cria recursos
+  inteiramente novos (EC2, ALB, ACM, S3 de access logs, security groups e um
+  registro DNS em subdominio). Nao altera nenhum recurso do ambiente de
+  producao: o Classic ELB ws-mundorevalida, a instancia i-00828fa57c7c08f48,
+  os security groups existentes e os registros do apex continuam intactos.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Rede
+        Parameters:
+          - VpcId
+          - AlbSubnetIds
+          - InstanceSubnetId
+      - Label:
+          default: Instancia
+        Parameters:
+          - InstanceType
+          - LatestUbuntuAmi
+          - KeyName
+          - SshAllowedCidr
+          - NodeMajorVersion
+      - Label:
+          default: DNS e TLS
+        Parameters:
+          - HostedZoneId
+          - DomainName
+      - Label:
+          default: Aplicacao
+        Parameters:
+          - AppPort
+          - AlbIdleTimeoutSeconds
+          - AccessLogRetentionDays
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-059fce4e71370c7ae
+    Description: VPC onde o ambiente de teste sobe. Padrao e a VPC default, a mesma da producao, porem com security groups exclusivos.
+
+  AlbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-06329d76e0da61c1f,subnet-0fc229fd15db45aee
+    Description: Subnets publicas do ALB, em AZs diferentes. Padrao e us-east-1a e us-east-1b, separadas das AZs usadas pela producao (1d e 1e).
+
+  InstanceSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-06329d76e0da61c1f
+    Description: Subnet publica da instancia de teste. Padrao us-east-1a.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+    Description: Tipo da instancia de teste.
+
+  LatestUbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: AMI mais recente do Ubuntu 22.04 LTS, resolvida pelo parametro publico da Canonical. Mesmo SO da producao.
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: websocket-server
+    Description: Par de chaves para acesso SSH. Padrao e a mesma chave usada na producao.
+
+  SshAllowedCidr:
+    Type: String
+    Default: 181.232.171.230/32
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: >-
+      CIDR liberado na porta 22. Padrao e o IP publico detectado na criacao do
+      template. Se o seu IP mudar, atualize este parametro ou use o SSM Session
+      Manager, que continua funcionando sem porta 22 aberta.
+
+  NodeMajorVersion:
+    Type: String
+    Default: "20"
+    AllowedValues:
+      - "18"
+      - "20"
+      - "22"
+      - "24"
+    Description: >-
+      Versao major do Node.js instalada via NodeSource. Confira a versao da
+      producao com "node -v" antes de decidir, para o teste ser fiel.
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Default: Z10269602WZ79L05L13CW
+    Description: Zona hospedada de web-socket-mundorevalida.com. O stack apenas ADICIONA registros nela; os registros do apex nao sao tocados.
+
+  DomainName:
+    Type: String
+    Default: teste.web-socket-mundorevalida.com
+    Description: Subdominio do ambiente de teste. Nao use o apex, que pertence a producao.
+
+  AppPort:
+    Type: Number
+    Default: 3000
+    Description: Porta em que o NestJS escuta na instancia.
+
+  AlbIdleTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 60
+    MaxValue: 4000
+    Description: Idle timeout do ALB. O Classic ELB de producao usa 60s; aqui validamos 3600s antes de mexer na producao.
+
+  AccessLogRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Dias de retencao dos access logs do ALB no S3.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Access logs do ALB
+  # ---------------------------------------------------------------------------
+
+  # Nome gerado pelo CloudFormation de proposito: evita colisao caso o stack
+  # seja recriado, ja que o bucket e retido na exclusao.
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # O ALB SO aceita SSE-S3 para access logs. SSE-KMS faz a entrega falhar.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expirar-access-logs
+            Status: Enabled
+            ExpirationInDays: !Ref AccessLogRetentionDays
+          - Id: limpar-uploads-incompletos
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Ambiente
+          Value: teste
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PermitirEntregaDeAccessLogsDoALB
+            Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/*"
+          - Sid: NegarTransporteInseguro
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt LogsBucket.Arn
+              - !Sub "${LogsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ---------------------------------------------------------------------------
+  # Security groups (novos, exclusivos do ambiente de teste)
+  # ---------------------------------------------------------------------------
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB do ambiente de teste do websocket. Aceita HTTPS e HTTP da internet.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS publico
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP publico, apenas para redirecionar a HTTPS
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+        - Key: Ambiente
+          Value: teste
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Instancia de teste do websocket. A porta da aplicacao so aceita trafego vindo do ALB.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+          Description: SSH restrito ao IP do operador
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instancia"
+        - Key: Ambiente
+          Value: teste
+
+  # Regras cruzadas ficam em recursos separados para nao criar dependencia
+  # circular entre os dois security groups.
+  InstanceIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: Porta da aplicacao, somente a partir do ALB de teste
+
+  AlbEgressToInstance:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      DestinationSecurityGroupId: !Ref InstanceSecurityGroup
+      Description: ALB alcanca a instancia de teste na porta da aplicacao
+
+  # ---------------------------------------------------------------------------
+  # IAM da instancia (inclui SSM, que a producao nao tem)
+  # ---------------------------------------------------------------------------
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
+      Tags:
+        - Key: Ambiente
+          Value: teste
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ---------------------------------------------------------------------------
+  # Instancia de teste
+  # ---------------------------------------------------------------------------
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestUbuntuAmi
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref InstanceSubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-websocket"
+        - Key: Ambiente
+          Value: teste
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y git curl ca-certificates build-essential
+
+          # Node.js via NodeSource
+          curl -fsSL https://deb.nodesource.com/setup_${NodeMajorVersion}.x | bash -
+          apt-get install -y nodejs
+
+          # O agente SSM vem como snap na AMI da Canonical. Garante que esta ativo.
+          snap install amazon-ssm-agent --classic || true
+          snap start amazon-ssm-agent || systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+          # Diretorio da aplicacao, onde o deploy manual vai clonar o projeto.
+          mkdir -p /opt/websocket
+          chown -R ubuntu:ubuntu /opt/websocket
+
+          # Unidade systemd ja pronta. NAO e iniciada aqui: o codigo ainda nao
+          # existe. Depois do build, rode: sudo systemctl enable --now websocket
+          cat >/etc/systemd/system/websocket.service <<'UNIT'
+          [Unit]
+          Description=Websocket NestJS (ambiente de teste)
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/opt/websocket
+          ExecStart=/usr/bin/node dist/main
+          Restart=always
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+          Environment=NODE_ENV=production
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          echo "bootstrap concluido" >/var/log/websocket-bootstrap-ok
+
+  # ---------------------------------------------------------------------------
+  # Certificado TLS do subdominio (validacao DNS automatica)
+  # ---------------------------------------------------------------------------
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Ambiente
+          Value: teste
+
+  # ---------------------------------------------------------------------------
+  # Application Load Balancer
+  # ---------------------------------------------------------------------------
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: LogsBucketPolicy
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref AlbSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: !Ref AlbIdleTimeoutSeconds
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref LogsBucket
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: deletion_protection.enabled
+          Value: "false"
+      Tags:
+        - Key: Ambiente
+          Value: teste
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: !Ref AppPort
+      TargetType: instance
+      Targets:
+        - Id: !Ref Instance
+          Port: !Ref AppPort
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        # Afinidade de sessao: o socket.io comeca em HTTP long-polling, e sem
+        # stickiness um segundo alvo quebraria a sessao do engine.io.
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "86400"
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Tags:
+        - Key: Ambiente
+          Value: teste
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref Certificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HttpRedirectListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  # ---------------------------------------------------------------------------
+  # DNS do subdominio. Registro NOVO: o apex de producao nao e alterado.
+  # ---------------------------------------------------------------------------
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+Outputs:
+  Url:
+    Description: URL do websocket de teste
+    Value: !Sub "https://${DomainName}"
+
+  LoadBalancerDns:
+    Description: DNS do ALB de teste
+    Value: !GetAtt LoadBalancer.DNSName
+
+  InstanceId:
+    Description: Id da instancia de teste
+    Value: !Ref Instance
+
+  InstancePublicIp:
+    Description: IP publico da instancia de teste
+    Value: !GetAtt Instance.PublicIp
+
+  SshCommand:
+    Description: Comando de acesso SSH
+    Value: !Sub "ssh -i ~/.ssh/${KeyName}.pem ubuntu@${Instance.PublicIp}"
+
+  SsmCommand:
+    Description: Acesso sem SSH, caso o IP do operador mude
+    Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region}"
+
+  AccessLogsBucket:
+    Description: Bucket dos access logs do ALB (retido se o stack for excluido)
+    Value: !Ref LogsBucket

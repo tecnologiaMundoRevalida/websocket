@@ -1,0 +1,131 @@
+#
+# Regras cfn-guard para o stack do ambiente de teste do websocket.
+#
+# Codificam as invariantes que importam NESTA tarefa: isolamento da producao,
+# os requisitos reais do ALB para access logs e um piso de seguranca na
+# instancia. Rode com:
+#
+#   cfn-guard validate --rules websocket-teste.guard --data websocket-teste.yaml
+#
+
+let s3_buckets      = Resources.*[ Type == 'AWS::S3::Bucket' ]
+let load_balancers  = Resources.*[ Type == 'AWS::ElasticLoadBalancingV2::LoadBalancer' ]
+let instances       = Resources.*[ Type == 'AWS::EC2::Instance' ]
+let dns_records     = Resources.*[ Type == 'AWS::Route53::RecordSet' ]
+let sg_ingress      = Resources.*[ Type == 'AWS::EC2::SecurityGroupIngress' ]
+let https_listeners = Resources.*[
+    Type == 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties.Protocol == "HTTPS"
+]
+
+#
+# O ALB so entrega access logs em bucket com SSE-S3. Com SSE-KMS a entrega
+# falha. Confirmado na documentacao da AWS.
+#
+rule access_logs_exigem_sse_s3 when %s3_buckets !empty {
+    %s3_buckets.Properties.BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm == "AES256"
+    <<O bucket de access logs do ALB precisa de SSE-S3 (AES256); SSE-KMS faz a entrega falhar.>>
+}
+
+rule bucket_de_logs_bloqueia_acl_publica when %s3_buckets !empty {
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicAcls == true
+    <<BlockPublicAcls deve ser true no bucket de access logs.>>
+}
+
+rule bucket_de_logs_bloqueia_policy_publica when %s3_buckets !empty {
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicPolicy == true
+    <<BlockPublicPolicy deve ser true no bucket de access logs.>>
+}
+
+rule bucket_de_logs_ignora_acl_publica when %s3_buckets !empty {
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.IgnorePublicAcls == true
+    <<IgnorePublicAcls deve ser true no bucket de access logs.>>
+}
+
+rule bucket_de_logs_restringe_acesso_publico when %s3_buckets !empty {
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.RestrictPublicBuckets == true
+    <<RestrictPublicBuckets deve ser true no bucket de access logs.>>
+}
+
+#
+# Isolamento: o stack de teste nao pode reaproveitar recursos de producao.
+#
+# A instancia so pode usar security groups criados por ESTE template. Exigir
+# que cada entrada seja um Ref interno e mais forte do que comparar com a lista
+# de IDs da producao: bloqueia qualquer ID hardcoded, inclusive os que ainda
+# nao existem.
+rule security_groups_sao_criados_neste_stack when %instances !empty {
+    %instances.Properties.SecurityGroupIds[*].Ref exists
+    <<
+        Cada security group da instancia de teste deve ser um Ref a um recurso
+        deste template. ID hardcoded (sg-...) acopla o teste a producao.
+    >>
+}
+
+# Mesma ideia para o DNS: o nome precisa vir do parametro DomainName, cujo
+# padrao ja e barrado de ser o apex pela regra subdominio_padrao_nao_e_o_apex.
+rule dns_usa_o_parametro_de_dominio when %dns_records !empty {
+    %dns_records.Properties.Name.Ref exists
+    <<
+        O registro DNS deve referenciar o parametro DomainName, nunca um nome
+        literal. O apex pertence a producao e resolve para o Classic ELB.
+    >>
+}
+
+rule subdominio_padrao_nao_e_o_apex {
+    Parameters.DomainName.Default != "web-socket-mundorevalida.com"
+    <<O parametro DomainName nao pode ter o apex de producao como padrao.>>
+}
+
+#
+# Seguranca da instancia.
+#
+rule instancia_exige_imdsv2 when %instances !empty {
+    %instances.Properties.MetadataOptions.HttpTokens == "required"
+    <<IMDSv2 obrigatorio: protege as credenciais do instance profile contra SSRF.>>
+}
+
+rule volume_raiz_criptografado when %instances !empty {
+    %instances.Properties.BlockDeviceMappings[*].Ebs.Encrypted == true
+    <<O volume raiz da instancia de teste precisa ser criptografado.>>
+}
+
+rule ssh_nao_pode_ser_aberto_ao_mundo {
+    Parameters.SshAllowedCidr.Default != "0.0.0.0/0"
+    <<A porta 22 nao pode ter 0.0.0.0/0 como padrao; o SSM cobre o caso do IP mudar.>>
+}
+
+#
+# A porta da aplicacao so pode ser alcancada pelo ALB, nunca direto da
+# internet. Na producao ela esta aberta em 0.0.0.0/0, o que nao repetimos aqui.
+#
+rule porta_da_aplicacao_vem_de_um_security_group when %sg_ingress !empty {
+    %sg_ingress.Properties.SourceSecurityGroupId exists
+    <<A porta da aplicacao deve aceitar trafego apenas do security group do ALB.>>
+}
+
+rule porta_da_aplicacao_nao_usa_cidr when %sg_ingress !empty {
+    %sg_ingress.Properties.CidrIp not exists
+    <<A regra da porta da aplicacao nao pode usar CidrIp; use SourceSecurityGroupId.>>
+}
+
+#
+# Itens do P2 sendo validados neste ambiente.
+#
+rule alb_com_access_logs_ligados when %load_balancers !empty {
+    %load_balancers.Properties.LoadBalancerAttributes[ Key == "access_logs.s3.enabled" ].Value == "true"
+    <<Access logs do ALB precisam estar habilitados neste ambiente.>>
+}
+
+rule alb_termina_tls {
+    %https_listeners !empty
+    <<O ALB precisa de um listener HTTPS.>>
+}
+
+rule listener_https_usa_politica_tls_moderna when %https_listeners !empty {
+    %https_listeners.Properties.SslPolicy IN [
+        "ELBSecurityPolicy-TLS13-1-2-2021-06",
+        "ELBSecurityPolicy-TLS13-1-2-Res-2021-06"
+    ]
+    <<O listener HTTPS deve usar politica TLS 1.2+ com suporte a TLS 1.3.>>
+}
