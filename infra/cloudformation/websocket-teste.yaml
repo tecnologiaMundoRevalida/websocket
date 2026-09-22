@@ -23,7 +23,7 @@ Metadata:
           - LatestUbuntuAmi
           - KeyName
           - SshAllowedCidr
-          - NodeMajorVersion
+          - NodeVersion
       - Label:
           default: DNS e TLS
         Parameters:
@@ -80,17 +80,15 @@ Parameters:
       template. Se o seu IP mudar, atualize este parametro ou use o SSM Session
       Manager, que continua funcionando sem porta 22 aberta.
 
-  NodeMajorVersion:
+  NodeVersion:
     Type: String
-    Default: "20"
-    AllowedValues:
-      - "18"
-      - "20"
-      - "22"
-      - "24"
+    Default: 18.17.1
+    AllowedPattern: ^\d+\.\d+\.\d+$
     Description: >-
-      Versao major do Node.js instalada via NodeSource. Confira a versao da
-      producao com "node -v" antes de decidir, para o teste ser fiel.
+      Versao EXATA do Node.js, instalada a partir do tarball oficial de
+      nodejs.org com verificacao de checksum. O padrao espelha a producao
+      (v18.17.1), conferida via "node -v". Nao usamos NodeSource porque o
+      Node 18 saiu de suporte e o script setup_18.x deixou de ser confiavel.
 
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
@@ -315,11 +313,19 @@ Resources:
 
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          apt-get install -y git curl ca-certificates build-essential
+          apt-get install -y git curl ca-certificates build-essential xz-utils
 
-          # Node.js via NodeSource
-          curl -fsSL https://deb.nodesource.com/setup_${NodeMajorVersion}.x | bash -
-          apt-get install -y nodejs
+          # Node.js na versao EXATA da producao, do tarball oficial, com
+          # checksum conferido contra o SHASUMS256.txt assinado do projeto.
+          NODE_VER="v${NodeVersion}"
+          NODE_TGZ="node-${!NODE_VER}-linux-x64.tar.xz"
+          cd /tmp
+          curl -fsSLO "https://nodejs.org/dist/${!NODE_VER}/${!NODE_TGZ}"
+          curl -fsSLO "https://nodejs.org/dist/${!NODE_VER}/SHASUMS256.txt"
+          grep " ${!NODE_TGZ}$" SHASUMS256.txt | sha256sum -c -
+          tar -xJf "${!NODE_TGZ}" -C /usr/local --strip-components=1 \
+              --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md
+          /usr/local/bin/node -v
 
           # O agente SSM vem como snap na AMI da Canonical. Garante que esta ativo.
           snap install amazon-ssm-agent --classic || true
@@ -340,7 +346,7 @@ Resources:
           Type=simple
           User=ubuntu
           WorkingDirectory=/opt/websocket
-          ExecStart=/usr/bin/node dist/main
+          ExecStart=/usr/local/bin/node dist/main
           Restart=always
           RestartSec=5
           StandardOutput=journal

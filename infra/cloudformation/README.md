@@ -36,13 +36,13 @@ aws cloudformation validate-template --template-body file://websocket-teste.yaml
 
 ## Deploy do stack
 
-Confira antes a versão do Node da produção, para o teste ser fiel:
+O parâmetro `NodeVersion` já vem com **18.17.1**, a versão exata da produção (conferida com `node -v`). O Node é instalado do tarball oficial de `nodejs.org` com o checksum verificado contra o `SHASUMS256.txt`, e não via NodeSource: o Node 18 saiu de suporte e o `setup_18.x` deixou de ser confiável.
+
+Se a produção for atualizada, confira de novo e ajuste o parâmetro:
 
 ```bash
 ssh -i ~/.ssh/websocket-server.pem ubuntu@44.196.233.187 'node -v'
 ```
-
-Se não for a v20, passe `NodeMajorVersion` com o valor certo.
 
 ```bash
 aws cloudformation create-change-set \
