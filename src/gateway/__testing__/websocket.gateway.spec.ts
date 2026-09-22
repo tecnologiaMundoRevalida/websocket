@@ -7,18 +7,15 @@ describe('WebsocketGateway', () => {
   let gateway: WebsocketGateway;
   let app: INestApplication;
   let mockServer: Partial<Server>;
-  let mockSocket: Partial<Socket>;
 
-  beforeEach(async () => {
-    mockServer = {
-      to: jest.fn().mockReturnThis(),
-      emit: jest.fn(),
-    };
-
-    mockSocket = {
-      id: 'mock-socket-id',
+  const makeSocket = (id: string, userId?: string): Socket =>
+    ({
+      id,
+      data: {},
+      rooms: new Set<string>(),
+      recovered: false,
       handshake: {
-        auth: {},
+        auth: userId ? { user_id: userId } : {},
         headers: {},
         time: '',
         address: '',
@@ -30,6 +27,14 @@ describe('WebsocketGateway', () => {
       },
       disconnect: jest.fn(),
       join: jest.fn(),
+      leave: jest.fn(),
+      on: jest.fn(),
+      to: jest.fn().mockReturnThis(),
+      emit: jest.fn(),
+    }) as unknown as Socket;
+
+  beforeEach(async () => {
+    mockServer = {
       to: jest.fn().mockReturnThis(),
       emit: jest.fn(),
     };
@@ -39,10 +44,13 @@ describe('WebsocketGateway', () => {
     }).compile();
 
     gateway = module.get<WebsocketGateway>(WebsocketGateway);
-    gateway.server = mockServer as Server;
 
     app = module.createNestApplication();
     await app.init();
+
+    // Depois do init: o @WebSocketServer() do Nest sobrescreve `server` durante
+    // a inicialização, então o mock só sobrevive se for atribuído aqui.
+    gateway.server = mockServer as Server;
   });
 
   afterEach(async () => {
@@ -50,113 +58,264 @@ describe('WebsocketGateway', () => {
   });
 
   describe('handleConnection', () => {
-    it('should disconnect client when no user_id is provided', () => {
-      gateway.handleConnection(mockSocket as Socket);
-      expect(mockSocket.disconnect).toHaveBeenCalled();
+    it('recusa conexão sem user_id', () => {
+      const socket = makeSocket('socket-1');
+
+      gateway.handleConnection(socket);
+
+      expect(socket.disconnect).toHaveBeenCalled();
+      expect(gateway.userBySocket.size).toBe(0);
+      expect(gateway.socketsByUser.size).toBe(0);
     });
 
-    it('should add user to connectedUsers when user_id is provided', () => {
-      const userID = 'user-123';
-      mockSocket.handshake.auth = { user_id: userID };
+    it('registra o socket e entra na room do usuário', () => {
+      const socket = makeSocket('socket-1', 'user-123');
 
-      gateway.handleConnection(mockSocket as Socket);
+      gateway.handleConnection(socket);
 
-      expect(gateway.connectedUsers.get(userID)).toBe(mockSocket.id);
-      expect(gateway.connectedUsersOnline.get(mockSocket.id)).toBe(userID);
-      expect(mockSocket.disconnect).not.toHaveBeenCalled();
+      expect(gateway.socketsByUser.get('user-123')).toEqual(
+        new Set(['socket-1']),
+      );
+      expect(gateway.userBySocket.get('socket-1')).toBe('user-123');
+      expect(socket.join).toHaveBeenCalledWith('user:user-123');
+      expect(socket.disconnect).not.toHaveBeenCalled();
+    });
+
+    it('acumula as conexões do mesmo usuário em vez de sobrescrever', () => {
+      gateway.handleConnection(makeSocket('socket-1', 'user-123'));
+      gateway.handleConnection(makeSocket('socket-2', 'user-123'));
+
+      expect(gateway.socketsByUser.get('user-123')).toEqual(
+        new Set(['socket-1', 'socket-2']),
+      );
+    });
+
+    it('restaura a sala do treinamento numa reconexão recuperada', () => {
+      const socket = makeSocket('socket-1', 'user-123');
+      (socket as any).recovered = true;
+      (socket as any).rooms = new Set([
+        'socket-1',
+        'user:user-123',
+        'training-42',
+      ]);
+
+      gateway.handleConnection(socket);
+
+      expect(gateway.roomBySocket.get('socket-1')).toBe('training-42');
     });
   });
 
   describe('handleDisconnect', () => {
-    it('should clean up all user references when disconnected', () => {
-      const userID = 'user-123';
-      const roomID = 'room-456';
+    it('limpa as referências do socket e avisa a sala', () => {
+      const socket = makeSocket('socket-1', 'user-123');
+      gateway.handleConnection(socket);
+      gateway.roomBySocket.set('socket-1', 'room-456');
 
-      // Simulate connection
-      mockSocket.handshake.auth = { user_id: userID };
-      gateway.handleConnection(mockSocket as Socket);
+      gateway.handleDisconnect(socket);
 
-      // Simulate joining a room
-      gateway.connectedUsersRoom.set(mockSocket.id, roomID);
+      expect(gateway.socketsByUser.has('user-123')).toBe(false);
+      expect(gateway.userBySocket.has('socket-1')).toBe(false);
+      expect(gateway.roomBySocket.has('socket-1')).toBe(false);
+      expect(socket.to).toHaveBeenCalledWith('room-456');
+      expect(socket.emit).toHaveBeenCalledWith('disconnectedRoom', 'room-456');
+    });
 
-      // Simulate disconnection
-      gateway.handleDisconnect(mockSocket as Socket);
+    it('não derruba a presença quando o usuário ainda tem outra conexão viva', () => {
+      const primeiraAba = makeSocket('socket-1', 'user-123');
+      const segundaAba = makeSocket('socket-2', 'user-123');
+      gateway.handleConnection(primeiraAba);
+      gateway.handleConnection(segundaAba);
 
-      // Verify cleanup
-      expect(gateway.connectedUsers.has(userID)).toBe(false);
-      expect(gateway.connectedUsersOnline.has(mockSocket.id)).toBe(false);
-      expect(gateway.connectedUsersRoom.has(mockSocket.id)).toBe(false);
+      gateway.handleDisconnect(primeiraAba);
 
-      // Verify room disconnection event was emitted
-      // Alterado de mockServer.to para mockSocket.to
-      expect(mockSocket.to).toHaveBeenCalledWith(roomID);
-      expect(mockSocket.emit).toHaveBeenCalledWith('disconnectedRoom', roomID);
+      expect(gateway.socketsByUser.get('user-123')).toEqual(
+        new Set(['socket-2']),
+      );
+    });
+
+    // Regressão: o disconnect do socket morto chega até `pingTimeout` depois
+    // de o cliente já ter reconectado. Com um slot único por usuário ele
+    // apagava o registro do socket NOVO e o aluno ficava online porém
+    // invisível para os outros até dar F5.
+    it('disconnect atrasado do socket antigo não apaga o socket novo', () => {
+      const socketAntigo = makeSocket('socket-antigo', 'user-123');
+      gateway.handleConnection(socketAntigo);
+
+      const socketNovo = makeSocket('socket-novo', 'user-123');
+      gateway.handleConnection(socketNovo);
+
+      gateway.handleDisconnect(socketAntigo);
+
+      expect(gateway.socketsByUser.get('user-123')).toEqual(
+        new Set(['socket-novo']),
+      );
+
+      const outro = makeSocket('socket-outro', 'user-999');
+      gateway.handleConnection(outro);
+      gateway.usersOnline(outro);
+
+      expect(mockServer.emit).toHaveBeenCalledWith('usersOnlineReceived', {
+        users: { 'user-123': 'socket-novo', 'user-999': 'socket-outro' },
+      });
+    });
+
+    it('isola usuários diferentes', () => {
+      const s1 = makeSocket('socket-1', 'user-1');
+      const s2 = makeSocket('socket-2', 'user-2');
+      gateway.handleConnection(s1);
+      gateway.handleConnection(s2);
+
+      gateway.handleDisconnect(s1);
+
+      expect(gateway.socketsByUser.has('user-1')).toBe(false);
+      expect(gateway.socketsByUser.has('user-2')).toBe(true);
+
+      gateway.handleDisconnect(s2);
+
+      expect(gateway.socketsByUser.size).toBe(0);
+      expect(gateway.userBySocket.size).toBe(0);
     });
   });
-  describe('disconnectedRoom', () => {
-    it('should clean up user references and emit event when leaving room', () => {
-      const userID = 'user-123';
-      const roomID = 'room-456';
 
-      // Simulate connection
-      mockSocket.handshake.auth = { user_id: userID };
-      gateway.handleConnection(mockSocket as Socket);
+  describe('leaveRoom', () => {
+    // Regressão: sair da sala não pode significar ficar offline.
+    it('sai da sala mas mantém o usuário online', () => {
+      const socket = makeSocket('socket-1', 'user-123');
+      gateway.handleConnection(socket);
+      gateway.roomBySocket.set('socket-1', 'room-456');
 
-      // Simulate joining a room
-      gateway.connectedUsersRoom.set(mockSocket.id, roomID);
+      gateway.disconnectedRoom(socket, 'room-456');
 
-      // Call disconnectedRoom directly
-      gateway.disconnectedRoom(mockSocket as Socket, roomID);
+      expect(gateway.roomBySocket.has('socket-1')).toBe(false);
+      expect(socket.leave).toHaveBeenCalledWith('room-456');
+      expect(socket.to).toHaveBeenCalledWith('room-456');
+      expect(socket.emit).toHaveBeenCalledWith('disconnectedRoom', 'room-456');
 
-      // Verify cleanup
-      expect(gateway.connectedUsers.has(userID)).toBe(false);
-      expect(gateway.connectedUsersOnline.has(mockSocket.id)).toBe(false);
-      expect(gateway.connectedUsersRoom.has(mockSocket.id)).toBe(false);
+      // continua online
+      expect(gateway.socketsByUser.get('user-123')).toEqual(
+        new Set(['socket-1']),
+      );
+      expect(gateway.userBySocket.get('socket-1')).toBe('user-123');
+    });
 
-      // Verify event emission
-      expect(mockSocket.to).toHaveBeenCalledWith(roomID);
-      expect(mockSocket.emit).toHaveBeenCalledWith('disconnectedRoom', roomID);
+    it('usa a sala corrente quando emitido sem payload (logout)', () => {
+      const socket = makeSocket('socket-1', 'user-123');
+      gateway.handleConnection(socket);
+      gateway.roomBySocket.set('socket-1', 'room-456');
+
+      gateway.disconnectedRoom(socket);
+
+      expect(socket.leave).toHaveBeenCalledWith('room-456');
+      expect(gateway.roomBySocket.has('socket-1')).toBe(false);
+    });
+
+    it('não emite nada quando o socket não estava em sala alguma', () => {
+      const socket = makeSocket('socket-1', 'user-123');
+      gateway.handleConnection(socket);
+
+      gateway.disconnectedRoom(socket);
+
+      expect(socket.leave).not.toHaveBeenCalled();
+      expect(socket.emit).not.toHaveBeenCalled();
     });
   });
 
-  describe('forced disconnections', () => {
-    it('should handle multiple forced disconnections correctly', () => {
-      const user1 = 'user-1';
-      const user2 = 'user-2';
-      const socket1 = {
-        ...mockSocket,
-        id: 'socket-1',
-        handshake: { auth: { user_id: user1 } },
-      };
-      const socket2 = {
-        ...mockSocket,
-        id: 'socket-2',
-        handshake: { auth: { user_id: user2 } },
-      };
+  describe('checkUserIsOnline', () => {
+    it('devolve um socket vivo quando o usuário está online', () => {
+      gateway.handleConnection(makeSocket('socket-1', 'user-123'));
+      const quemPergunta = makeSocket('socket-2', 'user-999');
+      gateway.handleConnection(quemPergunta);
 
-      // Connect both users
-      gateway.handleConnection(socket1 as unknown as Socket);
-      gateway.handleConnection(socket2 as unknown as Socket);
+      gateway.checkUserIsOnline(quemPergunta, { id: 'user-123' });
 
-      // Verify both are connected
-      expect(gateway.connectedUsers.size).toBe(2);
-      expect(gateway.connectedUsersOnline.size).toBe(2);
+      expect(mockServer.emit).toHaveBeenCalledWith('checkUserIsOnlineReceived', {
+        isOnline: 'socket-1',
+        id: 'user-123',
+      });
+    });
 
-      // Force disconnect first user
-      gateway.handleDisconnect(socket1 as unknown as Socket);
+    it('devolve undefined quando o usuário está offline', () => {
+      const quemPergunta = makeSocket('socket-2', 'user-999');
+      gateway.handleConnection(quemPergunta);
 
-      // Verify only first user was disconnected
-      expect(gateway.connectedUsers.has(user1)).toBe(false);
-      expect(gateway.connectedUsersOnline.has(socket1.id)).toBe(false);
-      expect(gateway.connectedUsers.has(user2)).toBe(true);
-      expect(gateway.connectedUsersOnline.has(socket2.id)).toBe(true);
+      gateway.checkUserIsOnline(quemPergunta, { id: 'user-123' });
 
-      // Force disconnect second user
-      gateway.handleDisconnect(socket2 as unknown as Socket);
+      expect(mockServer.emit).toHaveBeenCalledWith('checkUserIsOnlineReceived', {
+        isOnline: undefined,
+        id: 'user-123',
+      });
+    });
+  });
 
-      // Verify both are disconnected
-      expect(gateway.connectedUsers.size).toBe(0);
-      expect(gateway.connectedUsersOnline.size).toBe(0);
+  describe('joinRoom', () => {
+    it('entra na sala e avisa o par pela room do usuário', () => {
+      const instrutor = makeSocket('socket-1', 'user-1');
+      gateway.handleConnection(instrutor);
+
+      gateway.joinRoom(instrutor, { training: 'training-42', id: 'user-2' });
+
+      expect(instrutor.join).toHaveBeenCalledWith('training-42');
+      expect(gateway.roomBySocket.get('socket-1')).toBe('training-42');
+      expect(mockServer.to).toHaveBeenCalledWith('user:user-2');
+      expect(mockServer.emit).toHaveBeenCalledWith('joinedRoom', {
+        client_id: 'socket-1',
+        training: 'training-42',
+      });
+    });
+  });
+
+  describe('getUserOnlineRoom', () => {
+    it('anuncia o par quando ele já está na mesma sala', () => {
+      const aluno = makeSocket('socket-aluno', 'user-2');
+      gateway.handleConnection(aluno);
+      gateway.joinRoom(aluno, { training: 'training-42', id: 'user-1' });
+
+      const instrutor = makeSocket('socket-instrutor', 'user-1');
+      gateway.handleConnection(instrutor);
+
+      gateway.getUserOnlineRoom(instrutor, {
+        training: 'training-42',
+        id: 'user-2',
+      });
+
+      expect(mockServer.emit).toHaveBeenCalledWith(
+        'showUserOnlineRoom',
+        'socket-aluno',
+      );
+    });
+
+    it('não anuncia quando o par está online mas em outra sala', () => {
+      const aluno = makeSocket('socket-aluno', 'user-2');
+      gateway.handleConnection(aluno);
+      gateway.joinRoom(aluno, { training: 'outra-sala', id: 'user-1' });
+
+      const instrutor = makeSocket('socket-instrutor', 'user-1');
+      gateway.handleConnection(instrutor);
+      (mockServer.emit as jest.Mock).mockClear();
+
+      gateway.getUserOnlineRoom(instrutor, {
+        training: 'training-42',
+        id: 'user-2',
+      });
+
+      expect(mockServer.emit).not.toHaveBeenCalledWith(
+        'showUserOnlineRoom',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('private', () => {
+    it('entrega em todas as conexões do destinatário', () => {
+      gateway.handleConnection(makeSocket('socket-1', 'user-123'));
+      const remetente = makeSocket('socket-2', 'user-999');
+      gateway.handleConnection(remetente);
+
+      const payload = { student_id: 'user-123', message: 'oi' };
+      gateway.privateMessage(remetente, payload);
+
+      expect(mockServer.to).toHaveBeenCalledWith('user:user-123');
+      expect(mockServer.emit).toHaveBeenCalledWith('privateReceived', payload);
     });
   });
 });
