@@ -85,9 +85,11 @@ aws ssm start-session --target <InstanceId> --region us-east-1
 
 Na máquina:
 
+> **Atenção ao ponto final no `git clone`.** Sem ele o git cria `/opt/websocket/websocket/`, e o systemd procura `/opt/websocket/dist/main` — o serviço entra em loop de restart com `Cannot find module '/opt/websocket/dist/main'`.
+
 ```bash
 cd /opt/websocket
-git clone https://github.com/tecnologiaMundoRevalida/websocket.git .
+git clone https://github.com/tecnologiaMundoRevalida/websocket.git .   # <-- o "." importa
 git checkout fix/presenca-e-reconexao
 
 npm ci
@@ -95,6 +97,18 @@ npm run build
 
 sudo systemctl enable --now websocket
 systemctl status websocket
+```
+
+Se já tiver clonado na pasta aninhada por engano:
+
+```bash
+sudo systemctl stop websocket
+cd /opt/websocket/websocket
+shopt -s dotglob nullglob
+sudo mv -- * /opt/websocket/
+cd /opt/websocket && sudo rmdir websocket
+sudo chown -R ubuntu:ubuntu /opt/websocket
+sudo systemctl start websocket
 ```
 
 O repositório é privado. Se o `git clone` pedir credencial, use um token de acesso pessoal ou copie do seu micro:
@@ -148,3 +162,18 @@ Antes de excluir, vale desligar os access logs no ALB: se depois surgir um bucke
 Cerca de **US$ 33 a 35/mês**: ALB ~US$ 17 (base, mais LCU), t3.small ~US$ 15, EBS 20 GB gp3 ~US$ 1,60. ACM é gratuito; S3 e Route53 ficam em centavos neste volume.
 
 Se o ambiente for usado só em janelas de teste, dá para parar a instância e apagar o stack entre elas.
+
+## Teste de regressão da presença
+
+`teste-presenca.js` valida, contra o servidor rodando, os dois bugs de presença corrigidos no P1: a race do socket antigo apagando o novo, e o `leaveRoom` derrubando a presença global.
+
+```bash
+cd infra/cloudformation
+node teste-presenca.js https://teste.web-socket-mundorevalida.com
+```
+
+Precisa do `socket.io-client` disponível (rode a partir de um projeto que já o tenha, ou `npm i socket.io-client`).
+
+Resultado esperado no ambiente de teste: os quatro cenários passam.
+
+> **Não aponte este script para produção sem trocar os IDs.** Ele usa `99001` e `99002`; se existir aluno real com um desses IDs, o servidor antigo — que guarda um socket por usuário — sobrescreveria a presença dele e a apagaria no disconnect, deixando um aluno real offline. Contra produção, use IDs impossíveis de colidir, como strings aleatórias.
