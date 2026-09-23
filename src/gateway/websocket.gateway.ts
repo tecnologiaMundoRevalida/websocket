@@ -28,8 +28,13 @@ import { Server, Socket } from 'socket.io';
   // (wi-fi de universidade/hospital, 4G) por um engasgo passageiro.
   pingInterval: 25000,
   pingTimeout: 30000,
+  // O adapter em memória guarda TODO pacote emitido para uma room durante
+  // `maxDisconnectionDuration`, para poder reenviá-lo numa reconexão. Com 10min
+  // e os payloads do treinamento (checklist inteiro a cada mudança) o heap
+  // passava de 980MB e o processo morria por OOM. 2min ainda cobrem troca de
+  // rede e celular dormindo, que é o caso que a recuperação existe para salvar.
   connectionStateRecovery: {
-    maxDisconnectionDuration: 10 * 60 * 1000,
+    maxDisconnectionDuration: 2 * 60 * 1000,
     skipMiddlewares: false,
   },
 })
