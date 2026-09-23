@@ -8,6 +8,9 @@ import {
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 
+/** Intervalo mínimo entre respostas do `getUserOnlineRoom` para o mesmo socket. */
+const ROOM_QUERY_INTERVAL_MS = 1000;
+
 /**
  * Presença e salas de treinamento.
  *
@@ -52,6 +55,14 @@ export class WebsocketGateway
   userBySocket: Map<string, string> = new Map();
   /** socket.id -> sala de treinamento em que está */
   roomBySocket: Map<string, string> = new Map();
+
+  /** Controle do limite de respostas do `getUserOnlineRoom`, por socket. */
+  private readonly lastRoomQueryAt = new Map<string, number>();
+  private readonly latestRoomQuery = new Map<string, any>();
+  private readonly pendingRoomQuery = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   private userRoom(userId: string): string {
     return `user:${userId}`;
@@ -152,7 +163,7 @@ export class WebsocketGateway
       `joinRoom user=${client.data.userId} socket=${client.id} training=${training}`,
     );
 
-    this.getUserOnlineRoom(client, body);
+    this.announceUserInRoom(body);
   }
 
   @SubscribeMessage('trainingPrintedSend')
@@ -182,18 +193,65 @@ export class WebsocketGateway
       .emit('privateReceived', payload);
   }
 
+  /** Socket do usuário que está dentro da sala `training`, se houver. */
+  private socketInRoom(userId: string, training: string): string | undefined {
+    const sockets = this.socketsByUser.get(userId);
+    if (!sockets) return undefined;
+    for (const socketId of sockets) {
+      if (this.roomBySocket.get(socketId) === training) return socketId;
+    }
+    return undefined;
+  }
+
+  /** Anuncia para a sala que o par já está nela (usado no joinRoom). */
+  private announceUserInRoom(payload: any): void {
+    const training = String(payload.training);
+    const socketId = this.socketInRoom(String(payload.id), training);
+    if (socketId) this.server.to(training).emit('showUserOnlineRoom', socketId);
+  }
+
+  /**
+   * Pergunta "o usuário X está na sala?". Responde SÓ a quem perguntou e no
+   * máximo uma vez por ROOM_QUERY_INTERVAL_MS por socket.
+   *
+   * Antes a resposta ia para a sala inteira via `server.to(training)`, e o
+   * front do instrutor reage a todo `showUserOnlineRoom` perguntando de novo:
+   * cada resposta gerava uma nova pergunta, e cada tick do polling de 5s
+   * abria mais um desses laços. Com o connectionStateRecovery ligado, todo
+   * broadcast fica guardado no adapter, e em minutos eram 100 mil pacotes
+   * `showUserOnlineRoom` na memória (OOM do heap em 23/09/2026).
+   *
+   * `client.emit` não passa pelo adapter, então a resposta não é guardada. O
+   * limite por socket quebra o laço mesmo com o front antigo; perguntas
+   * que chegam dentro da janela são atendidas pela resposta agendada, que
+   * chega antes dos 3s de timeout do `checkUserIsInRoom`.
+   */
   @SubscribeMessage('getUserOnlineRoom')
   public getUserOnlineRoom(client: Socket, payload: any): void {
-    const training = String(payload.training);
-    const sockets = this.socketsByUser.get(String(payload.id));
-    if (!sockets) return;
+    this.latestRoomQuery.set(client.id, payload);
+    if (this.pendingRoomQuery.has(client.id)) return;
 
-    for (const socketId of sockets) {
-      if (this.roomBySocket.get(socketId) === training) {
-        this.server.to(training).emit('showUserOnlineRoom', socketId);
-        return;
-      }
+    const reply = () => {
+      this.pendingRoomQuery.delete(client.id);
+      this.lastRoomQueryAt.set(client.id, Date.now());
+      const latest = this.latestRoomQuery.get(client.id);
+      if (!latest || !client.connected) return;
+      const socketId = this.socketInRoom(
+        String(latest.id),
+        String(latest.training),
+      );
+      if (socketId) client.emit('showUserOnlineRoom', socketId);
+    };
+
+    const elapsed = Date.now() - (this.lastRoomQueryAt.get(client.id) ?? 0);
+    if (elapsed >= ROOM_QUERY_INTERVAL_MS) {
+      reply();
+      return;
     }
+    this.pendingRoomQuery.set(
+      client.id,
+      setTimeout(reply, ROOM_QUERY_INTERVAL_MS - elapsed),
+    );
   }
 
   /**
@@ -221,6 +279,11 @@ export class WebsocketGateway
 
     this.userBySocket.delete(client.id);
     this.roomBySocket.delete(client.id);
+
+    clearTimeout(this.pendingRoomQuery.get(client.id));
+    this.pendingRoomQuery.delete(client.id);
+    this.lastRoomQueryAt.delete(client.id);
+    this.latestRoomQuery.delete(client.id);
 
     if (userId) {
       const sockets = this.socketsByUser.get(userId);

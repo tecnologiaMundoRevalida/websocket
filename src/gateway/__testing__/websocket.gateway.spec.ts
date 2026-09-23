@@ -14,6 +14,7 @@ describe('WebsocketGateway', () => {
       data: {},
       rooms: new Set<string>(),
       recovered: false,
+      connected: true,
       handshake: {
         auth: userId ? { user_id: userId } : {},
         headers: {},
@@ -265,7 +266,37 @@ describe('WebsocketGateway', () => {
   });
 
   describe('getUserOnlineRoom', () => {
-    it('anuncia o par quando ele já está na mesma sala', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('responde só a quem perguntou, sem broadcast para a sala', () => {
+      const aluno = makeSocket('socket-aluno', 'user-2');
+      gateway.handleConnection(aluno);
+      gateway.joinRoom(aluno, { training: 'training-42', id: 'user-1' });
+
+      const instrutor = makeSocket('socket-instrutor', 'user-1');
+      gateway.handleConnection(instrutor);
+      (mockServer.emit as jest.Mock).mockClear();
+
+      gateway.getUserOnlineRoom(instrutor, {
+        training: 'training-42',
+        id: 'user-2',
+      });
+
+      expect(instrutor.emit).toHaveBeenCalledWith(
+        'showUserOnlineRoom',
+        'socket-aluno',
+      );
+      // Broadcast fica guardado no adapter do connectionStateRecovery.
+      expect(mockServer.emit).not.toHaveBeenCalledWith(
+        'showUserOnlineRoom',
+        expect.anything(),
+      );
+    });
+
+    it('limita as respostas por socket e atende a rajada com uma resposta agendada', () => {
+      jest.useFakeTimers();
       const aluno = makeSocket('socket-aluno', 'user-2');
       gateway.handleConnection(aluno);
       gateway.joinRoom(aluno, { training: 'training-42', id: 'user-1' });
@@ -273,11 +304,47 @@ describe('WebsocketGateway', () => {
       const instrutor = makeSocket('socket-instrutor', 'user-1');
       gateway.handleConnection(instrutor);
 
-      gateway.getUserOnlineRoom(instrutor, {
-        training: 'training-42',
-        id: 'user-2',
-      });
+      // O laço do front: cada resposta dispara outra pergunta na hora.
+      for (let i = 0; i < 50; i++) {
+        gateway.getUserOnlineRoom(instrutor, {
+          training: 'training-42',
+          id: 'user-2',
+        });
+      }
+      expect(instrutor.emit).toHaveBeenCalledTimes(1);
 
+      jest.advanceTimersByTime(1000);
+      expect(instrutor.emit).toHaveBeenCalledTimes(2);
+    });
+
+    it('não responde depois que o socket desconecta', () => {
+      jest.useFakeTimers();
+      const aluno = makeSocket('socket-aluno', 'user-2');
+      gateway.handleConnection(aluno);
+      gateway.joinRoom(aluno, { training: 'training-42', id: 'user-1' });
+
+      const instrutor = makeSocket('socket-instrutor', 'user-1');
+      gateway.handleConnection(instrutor);
+      const q = { training: 'training-42', id: 'user-2' };
+      gateway.getUserOnlineRoom(instrutor, q);
+      gateway.getUserOnlineRoom(instrutor, q);
+
+      gateway.handleDisconnect(instrutor);
+      jest.advanceTimersByTime(1000);
+
+      expect(instrutor.emit).toHaveBeenCalledTimes(1);
+    });
+
+    it('o joinRoom continua anunciando para a sala que o par já está nela', () => {
+      const aluno = makeSocket('socket-aluno', 'user-2');
+      gateway.handleConnection(aluno);
+      gateway.joinRoom(aluno, { training: 'training-42', id: 'user-1' });
+
+      const instrutor = makeSocket('socket-instrutor', 'user-1');
+      gateway.handleConnection(instrutor);
+      gateway.joinRoom(instrutor, { training: 'training-42', id: 'user-2' });
+
+      expect(mockServer.to).toHaveBeenCalledWith('training-42');
       expect(mockServer.emit).toHaveBeenCalledWith(
         'showUserOnlineRoom',
         'socket-aluno',
@@ -302,6 +369,7 @@ describe('WebsocketGateway', () => {
         'showUserOnlineRoom',
         expect.anything(),
       );
+      expect(instrutor.emit).not.toHaveBeenCalled();
     });
   });
 
